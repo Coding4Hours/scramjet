@@ -50,7 +50,7 @@ jobs:
 
       # Install wasm-snip fork
       - name: Install wasm-snip fork
-        run: cargo install --git https://github.com/MercuryWorkshop/wasm-snip
+        run: cargo install --git https://github.com/r58Playz/wasm-snip
 
       # Build the rewriter
       - name: Build rewriter
