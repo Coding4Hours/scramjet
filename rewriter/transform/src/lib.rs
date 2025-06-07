@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use oxc::{
 	allocator::{Allocator, Vec},
 	span::Span,
@@ -20,24 +22,26 @@ pub enum TransformError {
 }
 
 pub struct TransformResult<'alloc> {
-	pub js: Vec<'alloc, u8>,
-	pub sourcemap: Vec<'alloc, u8>,
+	pub source: Vec<'alloc, u8>,
+	pub map: Vec<'alloc, u8>,
 }
 
-pub struct Transformer<'alloc, T: Transform> {
+pub struct Transformer<'alloc, 'data, T: Transform<'data>> {
+	phantom: PhantomData<&'data str>,
 	alloc: Option<&'alloc Allocator>,
 	inner: std::vec::Vec<T>,
 }
 
-impl<T: Transform> Default for Transformer<'_, T> {
+impl<'data, T: Transform<'data>> Default for Transformer<'_, 'data, T> {
 	fn default() -> Self {
 		Self::new()
 	}
 }
 
-impl<'alloc, T: Transform> Transformer<'alloc, T> {
+impl<'alloc, 'data, T: Transform<'data>> Transformer<'alloc, 'data, T> {
 	pub fn new() -> Self {
 		Self {
+			phantom: PhantomData,
 			inner: std::vec::Vec::new(),
 			alloc: None,
 		}
@@ -73,8 +77,9 @@ impl<'alloc, T: Transform> Transformer<'alloc, T> {
 
 	pub fn perform(
 		&mut self,
-		js: &str,
+		js: &'data str,
 		data: &T::ToLowLevelData,
+		build_map: bool,
 	) -> Result<TransformResult<'alloc>, TransformError> {
 		let mut itoa = itoa::Buffer::new();
 
@@ -93,8 +98,13 @@ impl<'alloc, T: Transform> Transformer<'alloc, T> {
 
 		// insert has a 9 byte size, replace has a 13 byte minimum and usually it's like 5 bytes
 		// for the old str added on so use 16 as a really rough estimate
-		let mut map = Vec::with_capacity_in((self.inner.len() * 16) + 4, alloc);
-		map.extend_from_slice(&(self.inner.len() as u32).to_le_bytes());
+		let mut map = if build_map {
+			let mut map = Vec::with_capacity_in((self.inner.len() * 16) + 4, alloc);
+			map.extend_from_slice(&(self.inner.len() as u32).to_le_bytes());
+			map
+		} else {
+			Vec::new_in(alloc)
+		};
 
 		self.inner.sort();
 
@@ -105,27 +115,33 @@ impl<'alloc, T: Transform> Transformer<'alloc, T> {
 
 			let transform = change.into_low_level(data, cursor);
 			let len = transform.apply(&mut itoa, &mut buffer);
-			// pos
-			map.extend_from_slice(&start.wrapping_add_signed(offset).to_le_bytes());
-			// size
-			map.extend_from_slice(&len.to_le_bytes());
+			if build_map {
+				// pos
+				map.extend_from_slice(&start.wrapping_add_signed(offset).to_le_bytes());
+				// size
+				map.extend_from_slice(&len.to_le_bytes());
+			}
 
 			match transform.ty {
 				TransformType::Insert => {
 					buffer.extend_from_slice(tryget!(start..end).as_bytes());
 
-					// INSERT op
-					map.push(0);
+					if build_map {
+						// INSERT op
+						map.push(0);
+					}
 
 					offset = offset.wrapping_add_unsigned(len);
 				}
 				TransformType::Replace => {
-					// REPLACE op
-					map.push(1);
-					// len
-					map.extend_from_slice(&(end - start).to_le_bytes());
-					// oldstr
-					map.extend_from_slice(tryget!(start..end).as_bytes());
+					if build_map {
+						// REPLACE op
+						map.push(1);
+						// len
+						map.extend_from_slice(&(end - start).to_le_bytes());
+						// oldstr
+						map.extend_from_slice(tryget!(start..end).as_bytes());
+					}
 
 					let len =
 						i32::try_from(len).map_err(|_| TransformError::AddedTooLarge(cursor))?;
@@ -141,8 +157,8 @@ impl<'alloc, T: Transform> Transformer<'alloc, T> {
 		buffer.extend_from_slice(tryget!(cursor..js_len).as_bytes());
 
 		Ok(TransformResult {
-			js: buffer,
-			sourcemap: map,
+			source: buffer,
+			map,
 		})
 	}
 }

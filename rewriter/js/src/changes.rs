@@ -5,26 +5,27 @@ use oxc::{
 	ast::ast::AssignmentOperator,
 	span::{Atom, Span},
 };
-use smallvec::{smallvec, SmallVec};
 use transform::{
-	transform::{Change, Transform, TransformLL},
 	TransformResult, Transformer,
+	transform::{Transform, TransformLL},
+	transforms,
 };
 
 use crate::{
+	RewriterError,
 	cfg::{Config, Flags},
 	rewrite::Rewrite,
-	RewriterError,
 };
 
 // const STRICTCHECKER: &str = "(function(a){arguments[0]=false;return a})(true)";
-const STRICTCHECKER: &str = "(function(){return !this;})()";
+const STRICTCHECKER: &str = "(function(){return!this;})()";
 
-macro_rules! changes {
-	[$($change:expr),+] => {
-		smallvec![$(Change::from($change)),+]
+macro_rules! change {
+    ($span:expr, $($ty:tt)*) => {
+		$crate::changes::JsChange::new($span, $crate::changes::JsChangeType::$($ty)*)
     };
 }
+pub(crate) use change;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum JsChangeType<'alloc: 'data, 'data> {
@@ -57,10 +58,8 @@ pub enum JsChangeType<'alloc: 'data, 'data> {
 		op: AssignmentOperator,
 	},
 
-	/// replace span with `)`
-	ReplaceClosingParen,
 	/// insert `)`
-	ClosingParen { semi: bool },
+	ClosingParen { semi: bool, replace: bool },
 
 	/// replace span with text
 	Replace { text: &'alloc str },
@@ -80,46 +79,49 @@ impl<'alloc: 'data, 'data> JsChange<'alloc, 'data> {
 	}
 }
 
-impl<'alloc: 'data, 'data> Transform for JsChange<'alloc, 'data> {
+impl<'alloc: 'data, 'data> Transform<'data> for JsChange<'alloc, 'data> {
 	type ToLowLevelData = (&'data Config, &'data Flags);
 
 	fn span(&self) -> Span {
 		self.span
 	}
 
-	fn into_low_level(self, (cfg, flags): &Self::ToLowLevelData, cursor: u32) -> TransformLL<'_> {
+	fn into_low_level(
+		self,
+		(cfg, flags): &Self::ToLowLevelData,
+		cursor: u32,
+	) -> TransformLL<'data> {
 		use JsChangeType as Ty;
+		use TransformLL as LL;
 		match self.ty {
-			Ty::WrapFnLeft { wrap } => TransformLL::insert(if wrap {
-				changes!["(", &cfg.wrapfn, "("]
+			Ty::WrapFnLeft { wrap } => LL::insert(if wrap {
+				transforms!["(", &cfg.wrapfn, "("]
 			} else {
-				changes![&cfg.wrapfn, "("]
+				transforms![&cfg.wrapfn, "("]
 			}),
-			Ty::WrapFnRight { wrap } => TransformLL::insert(if wrap {
-				changes![",", STRICTCHECKER, "))"]
+			Ty::WrapFnRight { wrap } => LL::insert(if wrap {
+				transforms![",", STRICTCHECKER, "))"]
 			} else {
-				changes![",", STRICTCHECKER, ")"]
+				transforms![",", STRICTCHECKER, ")"]
 			}),
-			Ty::SetRealmFn => TransformLL::insert(changes![&cfg.setrealmfn, "({})."]),
-			Ty::WrapThisFn => TransformLL::insert(changes![&cfg.wrapthisfn, "("]),
-			Ty::ScramErrFn { ident } => TransformLL::insert(changes!["$scramerr(", ident, ");"]),
-			Ty::ScramitizeFn => TransformLL::insert(changes![" $scramitize("]),
-			Ty::EvalRewriteFn => TransformLL::replace(changes!["eval(", &cfg.rewritefn, "("]),
+			Ty::SetRealmFn => LL::insert(transforms![&cfg.setrealmfn, "({})."]),
+			Ty::WrapThisFn => LL::insert(transforms![&cfg.wrapthisfn, "("]),
+			Ty::ScramErrFn { ident } => LL::insert(transforms!["$scramerr(", ident, ");"]),
+			Ty::ScramitizeFn => LL::insert(transforms![" $scramitize("]),
+			Ty::EvalRewriteFn => LL::replace(transforms!["eval(", &cfg.rewritefn, "("]),
 			Ty::ShorthandObj { ident } => {
-				TransformLL::insert(changes![":", &cfg.wrapfn, "(", ident, ")"])
+				LL::insert(transforms![":", &cfg.wrapfn, "(", ident, ")"])
 			}
-			Ty::SourceTag => TransformLL::insert(changes![
+			Ty::SourceTag => LL::insert(transforms![
 				"/*scramtag ",
 				self.span.start + cursor,
 				" ",
 				&flags.sourcetag,
 				"*/"
 			]),
-			Ty::ImportFn => {
-				TransformLL::replace(changes![&cfg.importfn, "(\"", &flags.base, "\","])
-			}
-			Ty::MetaFn => TransformLL::replace(changes![&cfg.metafn, "(\"", &flags.base, "\")"]),
-			Ty::AssignmentLeft { name, op } => TransformLL::replace(changes![
+			Ty::ImportFn => LL::replace(transforms![&cfg.importfn, "(\"", &flags.base, "\","]),
+			Ty::MetaFn => LL::replace(transforms![&cfg.metafn, "(\"", &flags.base, "\")"]),
+			Ty::AssignmentLeft { name, op } => LL::replace(transforms![
 				"((t)=>$scramjet$tryset(",
 				name,
 				",\"",
@@ -129,12 +131,21 @@ impl<'alloc: 'data, 'data> Transform for JsChange<'alloc, 'data> {
 				op,
 				"t))("
 			]),
-			Ty::ReplaceClosingParen => TransformLL::replace(changes![")"]),
-			Ty::ClosingParen { semi } => {
-				TransformLL::replace(if semi { changes![");"] } else { changes![")"] })
+			Ty::ClosingParen { semi, replace } => {
+				let vec = if semi {
+					transforms![");"]
+				} else {
+					transforms![")"]
+				};
+
+				if replace {
+					LL::replace(vec)
+				} else {
+					LL::insert(vec)
+				}
 			}
-			Ty::Replace { text } => TransformLL::replace(changes![text]),
-			Ty::Delete => TransformLL::replace(SmallVec::new()),
+			Ty::Replace { text } => LL::replace(transforms![text]),
+			Ty::Delete => LL::replace(transforms![]),
 		}
 	}
 }
@@ -161,7 +172,7 @@ impl Ord for JsChange<'_, '_> {
 }
 
 pub(crate) struct JsChanges<'alloc: 'data, 'data> {
-	inner: Transformer<'alloc, JsChange<'alloc, 'data>>,
+	inner: Transformer<'alloc, 'data, JsChange<'alloc, 'data>>,
 }
 
 impl<'alloc: 'data, 'data> JsChanges<'alloc, 'data> {
@@ -199,6 +210,6 @@ impl<'alloc: 'data, 'data> JsChanges<'alloc, 'data> {
 		cfg: &'data Config,
 		flags: &'data Flags,
 	) -> Result<TransformResult<'alloc>, RewriterError> {
-		Ok(self.inner.perform(js, &(cfg, flags))?)
+		Ok(self.inner.perform(js, &(cfg, flags), true)?)
 	}
 }

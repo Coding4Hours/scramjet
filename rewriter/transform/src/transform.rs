@@ -1,19 +1,25 @@
-use oxc::{allocator::Vec, ast::ast::AssignmentOperator, span::{Atom, Span}};
+use oxc::{
+	allocator::Vec,
+	ast::ast::AssignmentOperator,
+	span::{Atom, Span},
+};
 use smallvec::SmallVec;
 
-pub enum Change<'a> {
+pub use smallvec as vecimpl;
+
+pub enum TransformElement<'a> {
 	Str(&'a str),
 	U32(u32),
 }
 
-impl Change<'_> {
+impl TransformElement<'_> {
 	fn eval(&self, itoa: &mut itoa::Buffer, buffer: &mut Vec<'_, u8>) -> usize {
 		match self {
-			Change::Str(x) => {
+			TransformElement::Str(x) => {
 				buffer.extend_from_slice(x.as_bytes());
 				x.len()
 			}
-			Change::U32(x) => {
+			TransformElement::U32(x) => {
 				let x = itoa.format(*x);
 				buffer.extend_from_slice(x.as_bytes());
 				x.len()
@@ -22,70 +28,70 @@ impl Change<'_> {
 	}
 }
 
-impl<'a> From<&'a str> for Change<'a> {
+impl<'a> From<&'a str> for TransformElement<'a> {
 	fn from(value: &'a str) -> Self {
 		Self::Str(value)
 	}
 }
 
-impl<'a> From<&&'a str> for Change<'a> {
+impl<'a> From<&&'a str> for TransformElement<'a> {
 	fn from(value: &&'a str) -> Self {
 		Self::Str(value)
 	}
 }
 
-impl<'a> From<&'a String> for Change<'a> {
+impl<'a> From<&'a String> for TransformElement<'a> {
 	fn from(value: &'a String) -> Self {
 		Self::Str(value)
 	}
 }
 
-impl<'a> From<Atom<'a>> for Change<'a> {
+impl<'a> From<Atom<'a>> for TransformElement<'a> {
 	fn from(value: Atom<'a>) -> Self {
 		Self::Str(value.as_str())
 	}
 }
 
-impl From<AssignmentOperator> for Change<'static> {
+impl From<AssignmentOperator> for TransformElement<'static> {
 	fn from(value: AssignmentOperator) -> Self {
 		Self::Str(value.as_str())
 	}
 }
 
-impl From<u32> for Change<'static> {
+impl From<u32> for TransformElement<'static> {
 	fn from(value: u32) -> Self {
 		Self::U32(value)
 	}
 }
 
-pub type Changes<'a> = SmallVec<[Change<'a>; 8]>;
+pub type TransformElements<'a> = SmallVec<[TransformElement<'a>; 8]>;
 
 pub enum TransformType {
 	Insert,
 	Replace,
 }
 
-pub trait Transform: Ord {
-	type ToLowLevelData;
+pub trait Transform<'a>: Ord {
+	type ToLowLevelData: 'a;
 
 	fn span(&self) -> Span;
-	fn into_low_level(self, data: &Self::ToLowLevelData, cursor: u32) -> TransformLL;
+	fn into_low_level(self, data: &Self::ToLowLevelData, cursor: u32) -> TransformLL<'a>;
 }
 
 pub struct TransformLL<'a> {
 	pub ty: TransformType,
-	pub change: Changes<'a>,
+	pub change: TransformElements<'a>,
 }
 
 impl<'a> TransformLL<'a> {
-	pub fn insert(change: Changes<'a>) -> Self {
+	pub fn insert(change: TransformElements<'a>) -> Self {
 		Self {
 			ty: TransformType::Insert,
 			change,
 		}
 	}
 
-	pub fn replace(change: Changes<'a>) -> Self {
+	pub fn replace(change: TransformElements<'a>) -> Self {
 		Self {
 			ty: TransformType::Replace,
 			change,
@@ -101,4 +107,12 @@ impl<'a> TransformLL<'a> {
 
 		len
 	}
+}
+
+#[macro_export]
+macro_rules! transforms {
+	[] => { $crate::transform::vecimpl::SmallVec::new() };
+	[$($change:expr),+] => {
+		$crate::transform::vecimpl::smallvec![$(transform::transform::TransformElement::from($change)),+]
+    };
 }
